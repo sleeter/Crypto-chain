@@ -6,7 +6,7 @@ from telebot import types
 import sqlite3
 from datetime import datetime, timedelta
 
-bot = telebot.TeleBot('')
+bot = telebot.TeleBot('5820743113:AAHX9Es0uu2tNP67qUYNrJwGlGXp-67pktw')
 
 
 users = []
