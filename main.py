@@ -58,6 +58,7 @@ def get_pay_link(amount, duration, user_id, order_id): # Функция для �
         "https://pay.wallet.tg/wpay/store-api/v1/order",
         json=payload, headers=headers, timeout=10
     )
+    print(response) #добавил
     data = response.json()
 
     if (response.status_code != 200) or (data['status'] not in ["SUCCESS", "ALREADY"]):
