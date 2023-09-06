@@ -1,17 +1,15 @@
-import re
+from flask import Flask, request
 import requests
-from bs4 import BeautifulSoup
 import telebot
 from telebot import types
 import sqlite3
 from datetime import datetime, timedelta
 
-bot = telebot.TeleBot('5820743113:AAHX9Es0uu2tNP67qUYNrJwGlGXp-67pktw')
+bot = telebot.TeleBot('6604097152:AAHB0Kr1P92O6b5zjlJGlP1cOuO9Kswz2Ws')
 
-
-users = []
-admins = [574752230, 350591707]
-# admins = [350591707]
+users = [] # Динамический массив хранящий id текущих пользователей
+orders = set() #
+admins = [574752230, 350591707] # Статический массив с id администраторов
 
 conn = sqlite3.connect("users_bot.sql")
 cur = conn.cursor()
@@ -19,22 +17,40 @@ cur = conn.cursor()
 # cur.execute('CREATE TABLE users (id int primary key, username varchar(50), first_name varchar(50),start_date datetime, duration varchar(10), end_of_date datetime)')
 cur.execute('CREATE TABLE IF NOT EXISTS users (id int primary key, username varchar(50), first_name varchar(50),start_date datetime, duration varchar(10), end_of_date datetime)')
 conn.commit()
-cur.execute('SELECT * FROM users')
+cur.execute('CREATE TABLE IF NOT EXISTS orderss (user_id int, external_id int, order_id varchar(20), duration varchar(10), start_date datetime)')
+conn.commit()
+
+cur.execute('SELECT * FROM users') # Заполнение массива users пользователями из базы данных
 usersSQL = cur.fetchall()
 if len(usersSQL) > 0:
     for el in usersSQL:
         users.append(int(el[0]))
+cur.execute('SELECT * FROM orders')
+ordersSQL = cur.fetchall()
+if len (ordersSQL) > 0:
+    for el in ordersSQL:
+        orders.add(int(el[0]))
 cur.close()
 conn.close()
 
-#Это написала поддержка
-# В соответствии с документацией externalId - это идентификатор заказов в вашей системе.
-# Используется он для того, чтобы предотвратить дублирование одного и того же заказа.
-# То есть вы сами задаете нужную нумерацию этого поля.
-# Примеры можно найти в нашей документации:  https://docs.wallet.tg/pay/#tag/Order/operation/create
+external_id = 1006
+def postOrder(amount, duration, user_id):
+    global external_id
+    if user_id in orders:
+        conn = sqlite3.connect("users_bot.sql")
+        cur = conn.cursor()
+        cur.execute("SELECT order_id FROM orderss where user_id = '%d'" % (user_id))
+        orders_id_of_this_user = cur.fetchall()
+        if len(orders_id_of_this_user) > 0:
+            for ord_id in orders_id_of_this_user:
+                ord = getOrder(ord_id)
+                if ord[0] == 'ACTIVE' and ord[2] == '0.01': # ord[0] - status, ord[2] - amount
+                        return ord[1] # ord[1] - paylink
+                else:
+                    continue
+        cur.close()
+        conn.close()
 
-
-def get_pay_link(amount, duration, user_id, order_id): # Функция для получения paylink
     headers = {
         'Wpay-Store-Api-Key': 'IvTW7ArJ6wgxDIUUkD8Yu9XZjpHV8skzV5Jp',
         'Content-Type': 'application/json',
@@ -44,28 +60,69 @@ def get_pay_link(amount, duration, user_id, order_id): # Функция для �
     payload = {
         'amount': {
             'currencyCode': 'USD',  # выставляем счет в долларах USD
-            'amount': f'{amount}',
+            'amount': '0.01',
         },
         'description': f'Subscription for {duration}',
-        'externalId': f'{order_id}',  # ID счета на оплату в вашем боте
-        'timeoutSeconds': 10800,  # время действия счета в секундах
+        'externalId': f'{external_id}',  # ID счета на оплату в вашем боте
+        'timeoutSeconds': 60*60,  # время действия счета в секундах
         'customerTelegramUserId': f'{user_id}',  # ID аккаунта Telegram покупателя
         'returnUrl': 'https://t.me/crypto_rise_bot',  # после успешной оплаты направить покупателя в наш бот
         'failReturnUrl': 'https://t.me/wallet',  # при отсутствии оплаты оставить покупателя в @wallet
     }
+    external_id +=1
 
     response = requests.post(
         "https://pay.wallet.tg/wpay/store-api/v1/order",
         json=payload, headers=headers, timeout=10
     )
-    print(response) #добавил
+
     data = response.json()
 
     if (response.status_code != 200) or (data['status'] not in ["SUCCESS", "ALREADY"]):
         return 'error'
+    print(data)
+    return [external_id, data['data']['id'], data['data']['payLink']]
 
-    return data['data']['payLink']
+def getOrder(order_id):
+    headers = {
+        'Wpay-Store-Api-Key': 'IvTW7ArJ6wgxDIUUkD8Yu9XZjpHV8skzV5Jp'
+    }
 
+    payload = {
+        'id': f'{order_id}'
+    }
+
+    response = requests.get(
+        url='https://pay.wallet.tg/wpay/store-api/v1/order/preview',
+        params=payload, headers=headers
+    )
+    data = response.json()
+
+    if (response.status_code != 200) or (data['status'] not in ["SUCCESS"]):
+        return 'error'
+    print(data)
+    return [data['data']['status'], data['data']['payLink'], data['data']['amount']['amount']]
+
+# print(getOrder(5590486413058))
+
+#https://habr.com/ru/articles/751848/
+app = Flask(__name__)
+@app.route('/127.0.0.1:8080/wh', methods=['POST'])
+def ipn_tgwallet():
+    for event in request.get_json():
+        if event["type"] == "ORDER_PAID":
+            data = event["payload"]
+            print("Оплачен счет N {} на сумму {} {}. Оплата {} {}.".format(
+                data["externalId"],  # ID счета в вашем боте, который мы указывали при создании ссылки для оплаты
+                data["orderAmount"]["amount"],  # Сумма счета, указанная при создании ссылки для оплаты
+                data["orderAmount"]["currencyCode"],  # Валюта счета
+                data["selectedPaymentOption"]["amount"]["amount"],  # Сколько оплатил покупатель
+                data["selectedPaymentOption"]["amount"]["currencyCode"]  # В какой криптовалюте
+            ))
+
+
+    # нужно всегда возвращать код 200, чтобы WalletPay не делал повторных вызовов вебхука
+    return 'OK'
 
 @bot.message_handler(commands=['start'])
 def start(message):
@@ -107,19 +164,13 @@ def show_chains(message):
 def plans(message):
     markup2 = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width = 1)
     markup1 = types.InlineKeyboardMarkup()
-    order_id = 1 #добавил
-    id = message.chat.id #добавил
-    one_week_link = get_pay_link(25, '1 week', id, order_id) #добавил
-    print(one_week_link) #добавил
-    one_month_link = get_pay_link(50, '1 month', id, order_id) #добавил
-    six_month_link = get_pay_link(200, '6 week', id, order_id) #добавил
-    btnWeek = types.InlineKeyboardButton(text='1 week', callback_data='1week', url=one_week_link, pay=True) #добавил url pay
-    btnMonth = types.InlineKeyboardButton(text='1 month', callback_data='1month', url=one_month_link, pay=True) #добавил url pay
-    btn6Month = types.InlineKeyboardButton(text='6 month', callback_data='6month', url=six_month_link, pay=True) #добавил url pay
+    btnWeek = types.InlineKeyboardButton(text='1 week', callback_data='1week')
+    btnMonth = types.InlineKeyboardButton(text='1 month', callback_data='1month')
+    btn6Month = types.InlineKeyboardButton(text='6 month', callback_data='6month')
     markup1.add(btnWeek).add(btnMonth).add(btn6Month)
     btnSub = types.KeyboardButton(text='/subscription')
     markup2.add(btnSub)
-    mess1 = f'There are 3 subscription plans available in this bot.\n1 week - 25 USDT\n1 month - 50 USDT\n6 months - 200 USDT'
+    mess1 = f'There are 3 subscription plans available in this bot.\n1 week - 50 USDT\n1 month - 150 USDT\n6 months - 600 USDT'
     mess2 = f'If for some reason you are unable to pay your subscription via Wallet click on /subscription'
     bot.send_message(message.chat.id, mess1, reply_markup=markup1, parse_mode='html')
     bot.send_message(message.chat.id, mess2, reply_markup=markup2, parse_mode='html')
@@ -142,15 +193,54 @@ def subscription(message):
 
 @bot.callback_query_handler(func=lambda callback: True)
 def callback_message(callback):
-    id = int(callback.message.chat.id)
-    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width = 1)
-    btn = types.KeyboardButton(text='Show chains')
-    markup.add(btn)
     callbackData = callback.data
-    global users, admins
+    global users, admins, orders
     if callbackData == 'getId':
         bot.send_message(callback.message.chat.id, f"Your id is `{callback.message.chat.id}`", parse_mode='MarkDown')
     elif callbackData == "1week" or callbackData == "1month" or callbackData == "6month":
+        user_id = int(callback.message.chat.id)
+        markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width = 1)
+        btn = types.KeyboardButton(text='Show chains')
+        markup.add(btn)
+        if user_id in users or user_id in admins:
+            bot.send_message(callback.message.chat.id, "You are already subscribed. Click the button to show the chains.", reply_markup=markup, parse_mode='html')
+        else:
+            start_date = datetime.now()
+            if callbackData == '1week':
+                duration = "1 week"
+                call = 'after_pay_1week'
+                ord = postOrder(50, duration, user_id)
+            elif callbackData == '1month':
+                duration = "1 month"
+                call = 'after_pay_1month'
+                ord = postOrder(150, duration, user_id)
+            else:
+                duration = "6 month"
+                call = 'after_pay_6month'
+                ord = postOrder(600, duration, user_id)
+            if len(ord) != 1:
+                cur_external_id = ord[0]
+                order_id = ord[1]
+                paylink = ord[2]
+                conn = sqlite3.connect("users_bot.sql")
+                cur = conn.cursor()
+                cur.execute("INSERT INTO orderss (user_id, external_id, order_id, duration, start_date) VALUES ('%d', '%s', '%s', '%s', '%s')" % (user_id, cur_external_id, order_id, duration, start_date))
+                conn.commit()
+                cur.close()
+                conn.close()
+                orders.add(user_id)
+            else:
+                paylink = ord[0]
+            btn2 = types.InlineKeyboardButton(text='Pay via Wallet', callback_data=call, url=paylink, pay=True)
+            markup2 = types.InlineKeyboardMarkup()
+            markup2.add(btn2)
+            bot.send_message(callback.message.chat.id, "You can pay for your subscription using the button below.", reply_markup=markup2, parse_mode='html')
+
+    elif callbackData == 'after_pay_1week' or callbackData == 'after_pay_1month' or callbackData == 'after_pay_6month':
+        id = int(callback.message.chat.id)
+        markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width = 1)
+        btn = types.KeyboardButton(text='Show chains')
+        markup.add(btn)
         if id in users or id in admins:
             bot.send_message(callback.message.chat.id, "You are already subscribed. Click the button to show the chains.", reply_markup=markup, parse_mode='html')
         else:
@@ -159,11 +249,11 @@ def callback_message(callback):
             duration = callbackData
             start_date = datetime.now()
             period = timedelta(1)
-            if duration == "1week":
+            if duration == "after_pay_1week":
                 period = timedelta(7)
-            elif duration == "1month":
+            elif duration == "after_pay_1month":
                 period = timedelta(30)
-            elif duration == "6month":
+            elif duration == "after_pay_6month":
                 period = timedelta(180)
             end_of_date = start_date + period
             conn = sqlite3.connect("users_bot.sql")
